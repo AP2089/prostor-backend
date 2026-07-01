@@ -1,0 +1,73 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Build
+        run: npm run build
+
+      - name: Create .env
+        run: |
+          cat > .output/.env <<EOF
+          PORT=${{ secrets.PORT }}
+          EOF
+
+      - name: Install production dependencies
+        run: cd .output && npm ci --omit=dev
+
+      - name: Install rar and sshpass
+        run: sudo apt-get install -y rar sshpass
+
+      - name: Create archive
+        run: rar a -r backend-deploy.rar .output
+
+      - name: Upload archive to server
+        run: |
+          sshpass -p "${{ secrets.SSH_PASSWORD }}" scp \
+            -o StrictHostKeyChecking=no \
+            backend-deploy.rar \
+            root@${{ secrets.SSH_HOST }}:/var/www/prostor.proskurin.site/backend/
+
+      - name: Deploy on server
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no root@$SSH_HOST bash << 'ENDSSH'
+          set -e
+          cd /var/www/prostor.proskurin.site/backend
+          rm -rf .output
+          unrar x backend-deploy.rar
+          rm -f backend-deploy.rar
+          pm2 delete prostor-backend 2>/dev/null || true
+          pm2 start /var/www/prostor.proskurin.site/backend/.output/server.ts \
+            --name prostor-backend \
+            --interpreter node \
+            --interpreter-args "--experimental-strip-types" \
+            --cwd /var/www/prostor.proskurin.site/backend/.output
+          pm2 save
+          ENDSSH
